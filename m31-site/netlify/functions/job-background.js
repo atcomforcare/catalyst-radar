@@ -1,6 +1,5 @@
 // Background function (note the "-background" suffix): runs up to 15 min,
 // returns 202 immediately, and writes its result to Netlify Blobs for polling.
-const { getStore } = require("@netlify/blobs");
 const { buildScanPrompt, buildDivePrompt, askClaude, enrich } = require("./lib");
 
 exports.handler = async (event) => {
@@ -9,6 +8,8 @@ exports.handler = async (event) => {
   const jobId = body.jobId;
   if (!jobId) return; // nothing to track
 
+  // @netlify/blobs is ESM-only — load it via dynamic import() from CommonJS.
+  const { getStore } = await import("@netlify/blobs");
   const store = getStore("catalyst-jobs");
   const A = process.env.ANTHROPIC_API_KEY;
   const F = process.env.FINNHUB_API_KEY;

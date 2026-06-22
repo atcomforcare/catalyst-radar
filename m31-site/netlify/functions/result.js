@@ -1,11 +1,12 @@
 // Polled by the page until the background job has written its result.
-const { getStore } = require("@netlify/blobs");
 const { jsonResp } = require("./lib");
 
 exports.handler = async (event) => {
   const jobId = (event.queryStringParameters || {}).jobId;
   if (!jobId) return jsonResp(400, { error: "missing jobId" });
   try {
+    // @netlify/blobs is ESM-only — load it via dynamic import() from CommonJS.
+    const { getStore } = await import("@netlify/blobs");
     const store = getStore("catalyst-jobs");
     const data = await store.get(jobId, { type: "json" });
     if (!data) return jsonResp(200, { status: "pending" });
