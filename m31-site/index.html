@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>m31</title>
+
+<meta name="theme-color" content="#000000">
+<meta name="referrer" content="no-referrer">
+
+<!-- Anti-indexing -->
+<meta name="robots" content="noindex, nofollow, noarchive, nosnippet, noimageindex, nocache, notranslate">
+<meta name="googlebot" content="noindex, nofollow, noarchive, nosnippet, noimageindex, nocache">
+<meta name="bingbot" content="noindex, nofollow, noarchive, nosnippet, noimageindex, nocache">
+<meta name="slurp" content="noindex, nofollow">
+<meta name="duckduckbot" content="noindex, nofollow">
+<meta name="yandexbot" content="noindex, nofollow">
+<meta name="baiduspider" content="noindex, nofollow">
+<meta name="GPTBot" content="noindex, nofollow">
+<meta name="ChatGPT-User" content="noindex, nofollow">
+<meta name="OAI-SearchBot" content="noindex, nofollow">
+<meta name="CCBot" content="noindex, nofollow">
+<meta name="anthropic-ai" content="noindex, nofollow">
+<meta name="ClaudeBot" content="noindex, nofollow">
+<meta name="Claude-Web" content="noindex, nofollow">
+<meta name="Google-Extended" content="noindex, nofollow">
+<meta name="PerplexityBot" content="noindex, nofollow">
+<meta name="Bytespider" content="noindex, nofollow">
+<meta name="Amazonbot" content="noindex, nofollow">
+<meta name="Applebot-Extended" content="noindex, nofollow">
+
+<style>
+  html, body {
+    margin: 0; padding: 0;
+    height: 100%; width: 100%;
+    background: #000;
+    overflow: hidden;
+    overscroll-behavior: none;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  canvas {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+    cursor: default;
+  }
+</style>
+</head>
+<body>
+<canvas id="sky"></canvas>
+
+<script>
+(() => {
+  'use strict';
+
+  const canvas = document.getElementById('sky');
+  const ctx = canvas.getContext('2d', { alpha: false });
+
+  // ============================================================
+  // RNG (seeded for stable star positions across reloads)
+  // ============================================================
+  function mulberry32(seed) {
+    return function() {
+      let t = seed += 0x6D2B79F5;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  const rng = mulberry32(7);
+  const rand = (a, b) => a + (b - a) * rng();
+  const randn = () => {
+    let u = 0, v = 0;
+    while (u === 0) u = rng();
+    while (v === 0) v = rng();
+    return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  };
+  const pick = arr => arr[Math.floor(rng() * arr.length)];
+
+  // ============================================================
+  // STATE
+  // ============================================================
+  let W = 0, H = 0, DPR = 1;
+  const stars = [];
+  const dustBlobs = [];
+  const bgStars = [];
+  const fgStars = [];
+
+  const TILT_ROTATION = -38 * Math.PI / 180;
+  const TILT_SCALE_Y = 0.58;
+  const cosT = Math.cos(TILT_ROTATION);
+  const sinT = Math.sin(TILT_ROTATION);
+
+  let timeStart = performance.now();
+  let lastFrame = timeStart;
+  let isVisible = true;
+  let reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // ============================================================
+  // GALAXY MATH
+  // ============================================================
+  const PITCH = 13 * Math.PI / 180;
+  const ARM_OFFSET = Math.PI;
+  const NUM_BULGE = 900;
+  const NUM_DISK = 4000;
+  const NUM_HALO = 500;
+  const NUM_RED = 140;
+  const NUM_DUST_BLOBS = 220;
+
+  const ARM_KNOTS = [
+    { arm: 0, t: 0.6, mult: 1.8, infl: 50 },
+    { arm: 0, t: 1.4, mult: 2.1, infl: 60 },
+    { arm: 0, t: 2.3, mult: 1.5, infl: 45 },
+    { arm: 1, t: 0.4, mult: 1.6, infl: 55 },
+    { arm: 1, t: 1.6, mult: 1.9, infl: 55 },
+    { arm: 1, t: 2.6, mult: 1.3, infl: 40 },
+  ];
+  const ARM_GAPS = [
+    { arm: 0, t: 1.9, infl: 30 },
+    { arm: 1, t: 1.0, infl: 35 },
+    { arm: 1, t: 2.2, infl: 25 },
+  ];
+
+  function armPosition(armIdx, t) {
+    const r = 30 + t * 150;
+    const spiralTheta = Math.log(r / 30) / Math.tan(PITCH);
+    const theta = spiralTheta + armIdx * ARM_OFFSET;
+    return { x: r * Math.cos(theta), y: r * Math.sin(theta), r, theta };
+  }
+  function knotBoost(x, y) {
+    let boost = 1.0;
+    for (const k of ARM_KNOTS) {
+      const p = armPosition(k.arm, k.t);
+      const d = Math.hypot(x - p.x, y - p.y);
+      if (d < k.infl) boost *= 1 + (k.mult - 1) * (1 - d / k.infl);
+    }
+    return boost;
+  }
+  function gapThin(x, y) {
+    let thin = 1.0;
+    for (const g of ARM_GAPS) {
+      const p = armPosition(g.arm, g.t);
+      const d = Math.hypot(x - p.x, y - p.y);
+      if (d < g.infl) thin *= 0.3 + 0.7 * (d / g.infl);
+    }
+    return thin;
+  }
+
+  // Differential rotation: outer slower than inner (Keplerian-ish)
+  function omega(r) {
+    return 0.00022 / Math.sqrt(Math.max(r, 30) / 100);
+  }
+
+  // ============================================================
+  // GENERATION
+  // ============================================================
+  function generateStars() {
+    stars.length = 0;
+    dustBlobs.length = 0;
+
+    // BULGE
+    for (let i = 0; i < NUM_BULGE; i++) {
+      const x = randn() * 42;
+      const y = randn() * 26;
+      const r = Math.hypot(x, y);
+      const angle = Math.atan2(y, x);
+      let size = pick([0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.3, 1.5]);
+      let brightness;
+      if (r < 15) { brightness = rand(0.7, 1.0); size *= 1.2; }
+      else brightness = rand(0.4, 0.9);
+      const color = pick([
+        [255, 245, 216], [255, 238, 192], [255, 226, 168], [255, 219, 160],
+        [255, 240, 200], [255, 217, 152], [255, 232, 176], [255, 208, 136],
+      ]);
+      const z = randn() * 25;
+      stars.push({ r, angle, size, brightness, color, z, kind: 'bulge' });
+    }
+
+    // DISK
+    let placed = 0, attempts = 0;
+    while (placed < NUM_DISK && attempts < NUM_DISK * 3) {
+      attempts++;
+      const u = rng();
+      const r = 50 + Math.pow(u, 0.55) * 430;
+      const armIdx = rng() < 0.5 ? 0 : 1;
+      const spiralTheta = Math.log(r / 30) / Math.tan(PITCH);
+      const isBetween = rng() < 0.22;
+      let angle, density;
+      if (isBetween) {
+        angle = rng() * 2 * Math.PI;
+        density = 0.6;
+      } else {
+        const sigma = 0.25 + r * 0.0006;
+        angle = spiralTheta + armIdx * ARM_OFFSET + randn() * sigma;
+        density = 1.0;
+      }
+      const x = r * Math.cos(angle);
+      const y = r * Math.sin(angle);
+      const thin = gapThin(x, y);
+      if (rng() > thin * density) continue;
+      const boost = knotBoost(x, y);
+      const baseSize = pick([0.4, 0.5, 0.5, 0.6, 0.6, 0.7, 0.8]);
+      const size = baseSize * Math.min(Math.pow(boost, 0.4), 1.6);
+      let brightness = rand(0.25, 0.7) * Math.min(Math.pow(boost, 0.5), 1.7);
+      brightness = Math.min(brightness, 0.95);
+
+      let color;
+      if (r < 100) {
+        color = pick([
+          [255, 240, 200], [255, 232, 184], [255, 238, 208], [255, 248, 224], [255, 232, 168],
+        ]);
+      } else if (r < 220) {
+        color = pick([
+          [255, 255, 255], [255, 245, 232], [232, 240, 255], [255, 240, 216],
+          [255, 248, 224], [216, 224, 255], [255, 240, 232], [224, 232, 248],
+        ]);
+      } else {
+        color = pick([
+          [255, 255, 255], [224, 232, 255], [208, 220, 255], [192, 212, 255],
+          [240, 244, 255], [232, 237, 255], [184, 200, 255], [255, 232, 240],
+        ]);
+      }
+      stars.push({ r, angle, size, brightness, color, z: randn() * 4, kind: 'disk' });
+      placed++;
+    }
+
+    // HII regions
+    const hiiCenters = [];
+    for (const k of ARM_KNOTS) {
+      const p = armPosition(k.arm, k.t);
+      const count = 3 + Math.floor(rng() * 4);
+      for (let i = 0; i < count; i++) {
+        hiiCenters.push({ x: p.x + randn() * 35, y: p.y + randn() * 25 });
+      }
+    }
+    for (let i = 0; i < 18; i++) {
+      const armIdx = rng() < 0.5 ? 0 : 1;
+      const t = rand(0.2, 2.8);
+      const p = armPosition(armIdx, t);
+      hiiCenters.push({ x: p.x + randn() * 25, y: p.y + randn() * 20 });
+    }
+    for (let i = 0; i < hiiCenters.length; i++) {
+      const { x, y } = hiiCenters[i];
+      const r = Math.hypot(x, y);
+      const angle = Math.atan2(y, x);
+      const isPink = rng() < 0.28;
+      const color = isPink
+        ? pick([[255, 159, 200], [255, 170, 207], [255, 143, 184], [255, 176, 216], [255, 200, 224]])
+        : pick([[168, 200, 255], [128, 176, 255], [159, 192, 255], [184, 212, 255], [192, 216, 255], [127, 168, 255]]);
+      const size = rand(0.9, 1.6);
+      const brightness = rand(0.65, 0.95);
+      stars.push({ r, angle, size, brightness, color, z: randn() * 3, kind: 'hii', glow: true });
+    }
+
+    // Red giants
+    for (let i = 0; i < NUM_RED; i++) {
+      const r = rand(20, 450);
+      const angle = rng() * 2 * Math.PI;
+      const color = pick([
+        [255, 128, 96], [255, 144, 112], [255, 160, 128], [232, 120, 88], [255, 112, 80], [255, 168, 136],
+      ]);
+      const size = pick([0.7, 0.8, 0.9, 1.0]);
+      const brightness = rand(0.45, 0.85);
+      stars.push({ r, angle, size, brightness, color, z: randn() * 5, kind: 'red' });
+    }
+
+    // Halo
+    for (let i = 0; i < NUM_HALO; i++) {
+      const r = 480 * rand(0.85, 1.7);
+      const angle = rng() * 2 * Math.PI;
+      const size = pick([0.3, 0.4, 0.4, 0.5]);
+      const brightness = rand(0.1, 0.35);
+      const color = pick([[255, 255, 255], [255, 240, 224], [232, 232, 240], [255, 240, 208]]);
+      stars.push({ r, angle, size, brightness, color, z: randn() * 8, kind: 'halo' });
+    }
+
+    // Dust blobs — patchy, clumpy, along inner edge of arm 0
+    for (let i = 0; i < NUM_DUST_BLOBS; i++) {
+      const t = rand(0.25, 2.05);
+      const p = armPosition(0, t);
+      const r = p.r - rand(8, 22);
+      const tangentAngle = p.theta + Math.PI / 2;
+      const offset = randn() * 14;
+      const x = r * Math.cos(p.theta) + Math.cos(tangentAngle) * offset;
+      const y = r * Math.sin(p.theta) + Math.sin(tangentAngle) * offset;
+      dustBlobs.push({
+        r: Math.hypot(x, y),
+        angle: Math.atan2(y, x),
+        size: rand(5, 16),
+        opacity: rand(0.35, 0.78),
+        elongation: rand(0.5, 1.4),
+        rotation: rng() * Math.PI,
+      });
+    }
+  }
+
+  function generateBgStars() {
+    bgStars.length = 0;
+    fgStars.length = 0;
+    const fieldCount = Math.floor(W * H / 9000);
+    for (let i = 0; i < fieldCount; i++) {
+      bgStars.push({
+        x: rng() * W,
+        y: rng() * H,
+        size: pick([0.3, 0.4, 0.4, 0.5, 0.5, 0.6, 0.7, 0.8]),
+        opacity: rand(0.2, 0.65),
+      });
+    }
+    for (let i = 0; i < 4; i++) {
+      fgStars.push({
+        x: rng() * W,
+        y: rng() * H,
+        size: rand(1.0, 1.5),
+        glow: rand(9, 15),
+        tint: pick([[255, 255, 255], [255, 248, 208], [232, 236, 255], [255, 240, 224]]),
+      });
+    }
+  }
+
+  // ============================================================
+  // RESIZE
+  // ============================================================
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = W * DPR;
+    canvas.height = H * DPR;
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    generateBgStars();
+  }
+
+  // ============================================================
+  // PROJECTION
+  // ============================================================
+  // Projects from disk-plane coords (x, y, z) to viewer-frame.
+  // Returns [screenX, screenY, depthFactor 0..1]
+  function project(x, y, z) {
+    const rotX = x * cosT - y * sinT;
+    const rotY = x * sinT + y * cosT;
+    const screenY = rotY * TILT_SCALE_Y;
+    // depth: post-rotation Y position determines near/far along viewer's depth axis
+    // After scaleY the disk is tilted — positive rotY = closer to viewer
+    const maxRotY = 500;
+    const depthFactor = Math.max(0, Math.min(1,
+      0.5 + (rotY + (z || 0) * 4) / (2 * maxRotY)
+    ));
+    return [rotX, screenY, depthFactor];
+  }
+
+  // ============================================================
+  // DRAW
+  // ============================================================
+  function drawBackground() {
+    const grd = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, Math.max(W, H) * 0.7);
+    grd.addColorStop(0, '#0a0a12');
+    grd.addColorStop(0.55, '#040407');
+    grd.addColorStop(1, '#010102');
+    ctx.fillStyle = grd;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  function drawBgStars() {
+    for (const f of fgStars) {
+      const grd = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, f.glow);
+      grd.addColorStop(0, `rgba(${f.tint[0]},${f.tint[1]},${f.tint[2]},0.85)`);
+      grd.addColorStop(0.35, `rgba(${f.tint[0]},${f.tint[1]},${f.tint[2]},0.22)`);
+      grd.addColorStop(1, `rgba(${f.tint[0]},${f.tint[1]},${f.tint[2]},0)`);
+      ctx.fillStyle = grd;
+      ctx.beginPath();
+      ctx.arc(f.x, f.y, f.glow, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = `rgba(${f.tint[0]},${f.tint[1]},${f.tint[2]},1)`;
+      ctx.beginPath();
+      ctx.arc(f.x, f.y, f.size, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.fillStyle = '#fff';
+    for (const s of bgStars) {
+      ctx.globalAlpha = s.opacity;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.size, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawStar(s, cx, cy, t) {
+    const w = omega(s.r);
+    const curAngle = s.angle + w * t;
+    const x = s.r * Math.cos(curAngle);
+    const y = s.r * Math.sin(curAngle);
+    const [sx, sy, depth] = project(x, y, s.z);
+
+    // Atmospheric perspective
+    const atmDim = 0.55 + 0.45 * depth;
+    const r = s.color[0] * atmDim;
+    const g = s.color[1] * atmDim;
+    const b = s.color[2] * Math.min(1, atmDim + 0.05);
+    const alpha = s.brightness * (0.7 + 0.3 * depth);
+
+    if (s.glow) {
+      const haloR = s.size * 7;
+      const grd = ctx.createRadialGradient(cx + sx, cy + sy, 0, cx + sx, cy + sy, haloR);
+      grd.addColorStop(0, `rgba(${r|0},${g|0},${b|0},${alpha * 0.5})`);
+      grd.addColorStop(0.5, `rgba(${r|0},${g|0},${b|0},${alpha * 0.15})`);
+      grd.addColorStop(1, `rgba(${r|0},${g|0},${b|0},0)`);
+      ctx.fillStyle = grd;
+      ctx.beginPath();
+      ctx.arc(cx + sx, cy + sy, haloR, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.fillStyle = `rgba(${r|0},${g|0},${b|0},${alpha})`;
+    ctx.beginPath();
+    ctx.arc(cx + sx, cy + sy, s.size, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawDustBlob(b, cx, cy, t) {
+    const w = omega(b.r);
+    const curAngle = b.angle + w * t;
+    const x = b.r * Math.cos(curAngle);
+    const y = b.r * Math.sin(curAngle);
+    const [sx, sy, depth] = project(x, y, 0);
+    if (depth < 0.46) return;
+    const opacityFactor = (depth - 0.46) / 0.54;
+    ctx.save();
+    ctx.translate(cx + sx, cy + sy);
+    ctx.rotate(b.rotation + curAngle * 0.3);
+    const grd = ctx.createRadialGradient(0, 0, 0, 0, 0, b.size);
+    grd.addColorStop(0, `rgba(6, 3, 3, ${b.opacity * opacityFactor})`);
+    grd.addColorStop(0.6, `rgba(6, 3, 3, ${b.opacity * opacityFactor * 0.5})`);
+    grd.addColorStop(1, `rgba(6, 3, 3, 0)`);
+    ctx.fillStyle = grd;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, b.size, b.size * b.elongation, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawBulgeGlow(cx, cy, behind) {
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(TILT_ROTATION);
+    ctx.scale(1, TILT_SCALE_Y);
+
+    if (behind) {
+      const halo = ctx.createRadialGradient(0, 0, 0, 0, 0, 540);
+      halo.addColorStop(0, 'rgba(152, 144, 184, 0.06)');
+      halo.addColorStop(0.55, 'rgba(80, 72, 112, 0.015)');
+      halo.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = halo;
+      ctx.beginPath();
+      ctx.arc(0, 0, 540, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.save();
+      ctx.scale(1.7, 1);
+      const outerBulge = ctx.createRadialGradient(0, 0, 0, 0, 0, 200);
+      outerBulge.addColorStop(0, 'rgba(255, 232, 184, 0.4)');
+      outerBulge.addColorStop(0.35, 'rgba(255, 208, 144, 0.18)');
+      outerBulge.addColorStop(0.7, 'rgba(180, 136, 88, 0.05)');
+      outerBulge.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = outerBulge;
+      ctx.beginPath();
+      ctx.arc(0, 0, 200, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    } else {
+      ctx.save();
+      ctx.scale(1.7, 1);
+      const innerBulge = ctx.createRadialGradient(0, 0, 0, 0, 0, 90);
+      innerBulge.addColorStop(0, 'rgba(255, 248, 224, 0.92)');
+      innerBulge.addColorStop(0.18, 'rgba(255, 232, 176, 0.55)');
+      innerBulge.addColorStop(0.55, 'rgba(200, 152, 96, 0.12)');
+      innerBulge.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = innerBulge;
+      ctx.beginPath();
+      ctx.arc(0, 0, 90, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      ctx.save();
+      ctx.scale(1.6, 1);
+      const core = ctx.createRadialGradient(0, 0, 0, 0, 0, 35);
+      core.addColorStop(0, 'rgba(255, 255, 255, 0.95)');
+      core.addColorStop(0.45, 'rgba(255, 248, 224, 0.35)');
+      core.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = core;
+      ctx.beginPath();
+      ctx.arc(0, 0, 35, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    ctx.restore();
+  }
+
+  function drawSatellite(cx, cy, gx, gy, rx, ry, rotation, stops) {
+    const [sx, sy] = project(gx, gy, 0);
+    ctx.save();
+    ctx.translate(cx + sx, cy + sy);
+    ctx.rotate(TILT_ROTATION + rotation);
+    ctx.scale(1, TILT_SCALE_Y);
+    const maxR = Math.max(rx, ry);
+    const grd = ctx.createRadialGradient(0, 0, 0, 0, 0, maxR);
+    for (const stop of stops) grd.addColorStop(stop[0], stop[1]);
+    ctx.fillStyle = grd;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // ============================================================
+  // MAIN LOOP
+  // ============================================================
+  function frame(now) {
+    if (!isVisible) {
+      lastFrame = now;
+      requestAnimationFrame(frame);
+      return;
+    }
+    lastFrame = now;
+    const t = (now - timeStart) * (reducedMotion ? 0.15 : 1);
+
+    // Motion trail overlay — semi-transparent fill produces glow/streak as stars move
+    ctx.fillStyle = 'rgba(2, 2, 4, 0.30)';
+    ctx.fillRect(0, 0, W, H);
+
+    // Re-paint background gradient subtly so it doesn't fade away
+    drawBackground();
+
+    // Static field stars
+    drawBgStars();
+
+    const cx = W / 2;
+    const cy = H / 2;
+
+    // Camera drift for 3D depth
+    const driftPhase = (now - timeStart) / 60000 * Math.PI * 2;
+    const driftAngle = Math.sin(driftPhase) * 0.026;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(driftAngle);
+    ctx.translate(-cx, -cy);
+
+    // === LAYER 1: BEHIND (halo + outer bulge) ===
+    drawBulgeGlow(cx, cy, true);
+
+    // === LAYER 2: M110 (far companion) ===
+    drawSatellite(cx, cy, 152, -326, 62, 38, -30 * Math.PI / 180, [
+      [0, 'rgba(255, 232, 196, 0.45)'],
+      [0.55, 'rgba(160, 136, 88, 0.12)'],
+      [1, 'rgba(0,0,0,0)'],
+    ]);
+
+    // === LAYER 3: Far-side disk stars ===
+    for (const s of stars) {
+      const w = omega(s.r);
+      const curAngle = s.angle + w * t;
+      const x = s.r * Math.cos(curAngle);
+      const y = s.r * Math.sin(curAngle);
+      const rotY = x * sinT + y * cosT;
+      const depth = Math.max(0, Math.min(1, 0.5 + (rotY + (s.z || 0) * 4) / 1000));
+      if (depth < 0.5) drawStar(s, cx, cy, t);
+    }
+
+    // === LAYER 4: Inner bulge + nucleus (poking through) ===
+    drawBulgeGlow(cx, cy, false);
+
+    // === LAYER 5: M32 (close companion, near side) ===
+    drawSatellite(cx, cy, -80, 29, 34, 30, 0, [
+      [0, 'rgba(255, 240, 208, 0.95)'],
+      [0.15, 'rgba(255, 220, 168, 0.6)'],
+      [0.5, 'rgba(168, 120, 88, 0.2)'],
+      [1, 'rgba(0,0,0,0)'],
+    ]);
+    {
+      const [sx, sy] = project(-80, 29, 0);
+      ctx.fillStyle = 'rgba(255, 248, 224, 0.95)';
+      ctx.beginPath();
+      ctx.arc(cx + sx, cy + sy, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // === LAYER 6: Near-side disk stars ===
+    for (const s of stars) {
+      const w = omega(s.r);
+      const curAngle = s.angle + w * t;
+      const x = s.r * Math.cos(curAngle);
+      const y = s.r * Math.sin(curAngle);
+      const rotY = x * sinT + y * cosT;
+      const depth = Math.max(0, Math.min(1, 0.5 + (rotY + (s.z || 0) * 4) / 1000));
+      if (depth >= 0.5) drawStar(s, cx, cy, t);
+    }
+
+    // === LAYER 7: Dust (patchy, on near side only) ===
+    for (const b of dustBlobs) drawDustBlob(b, cx, cy, t);
+
+    ctx.restore();
+
+    requestAnimationFrame(frame);
+  }
+
+  // ============================================================
+  // INIT
+  // ============================================================
+  function init() {
+    resize();
+    generateStars();
+    lastFrame = performance.now();
+    timeStart = lastFrame;
+    requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', resize, { passive: true });
+
+  document.addEventListener('visibilitychange', () => {
+    isVisible = !document.hidden;
+    if (isVisible) lastFrame = performance.now();
+  });
+
+  window.matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change', e => {
+    reducedMotion = e.matches;
+  });
+
+  init();
+})();
+</script>
+</body>
+</html>
