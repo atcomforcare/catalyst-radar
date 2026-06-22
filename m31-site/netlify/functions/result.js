@@ -1,0 +1,16 @@
+// Polled by the page until the background job has written its result.
+const { getStore } = require("@netlify/blobs");
+const { jsonResp } = require("./lib");
+
+exports.handler = async (event) => {
+  const jobId = (event.queryStringParameters || {}).jobId;
+  if (!jobId) return jsonResp(400, { error: "missing jobId" });
+  try {
+    const store = getStore("catalyst-jobs");
+    const data = await store.get(jobId, { type: "json" });
+    if (!data) return jsonResp(200, { status: "pending" });
+    return jsonResp(200, data);
+  } catch (e) {
+    return jsonResp(500, { error: String((e && e.message) || e) });
+  }
+};

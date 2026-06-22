@@ -298,20 +298,35 @@
   function fmtTime(ms){ return new Date(ms).toLocaleTimeString(undefined,{hour:"numeric",minute:"2-digit"}); }
 
   var lastRaw = "";
+  function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
+  function newJobId(){ return "J"+Date.now()+Math.random().toString(36).slice(2,8); }
+
+  // Kick off the background research job, then poll its result until done.
+  async function runJob(payload){
+    var jobId = newJobId();
+    var body = { jobId:jobId };
+    for(var k in payload){ if(payload.hasOwnProperty(k)) body[k]=payload[k]; }
+    var t = await fetch("/.netlify/functions/job-background",{ method:"POST",
+      headers:{"content-type":"application/json"}, body:JSON.stringify(body) });
+    if(t.status!==202 && !t.ok){ var et=""; try{ et=await t.text(); }catch(e){} lastRaw=String(et).slice(0,800); throw new Error("Couldn't start the research job. Try again."); }
+
+    var deadline = Date.now()+170000;
+    while(Date.now()<deadline){
+      await sleep(3000);
+      var r = await fetch("/.netlify/functions/result?jobId="+encodeURIComponent(jobId));
+      var txt = await r.text(); lastRaw = String(txt).slice(0,800);
+      var j; try{ j=JSON.parse(txt); }catch(e){ continue; }
+      if(j.status==="done") return j.results || [];
+      if(j.status==="error") throw new Error(j.error || "Research failed.");
+      // status "pending" -> keep polling
+    }
+    throw new Error("Timed out waiting for results. Tap Scan to try again.");
+  }
   async function apiScan(count, filter, exclude){
-    var r = await fetch("/api/scan",{ method:"POST", headers:{"content-type":"application/json"},
-      body:JSON.stringify({ count:count, filter:filter, exclude:exclude }) });
-    var txt = await r.text(); lastRaw = String(txt).slice(0,800);
-    var j; try{ j=JSON.parse(txt); }catch(e){ throw new Error("Unexpected response from the server."); }
-    if(!r.ok || j.error) throw new Error(j.error || ("Server error "+r.status));
-    return j.results || [];
+    return runJob({ mode:"scan", count:count, filter:filter, exclude:exclude });
   }
   async function apiQuote(ticker){
-    var r = await fetch("/api/quote?ticker="+encodeURIComponent(ticker));
-    var txt = await r.text(); lastRaw = String(txt).slice(0,800);
-    var j; try{ j=JSON.parse(txt); }catch(e){ throw new Error("Unexpected response from the server."); }
-    if(!r.ok || j.error) throw new Error(j.error || ("Server error "+r.status));
-    return j.results || [];
+    return runJob({ mode:"dive", ticker:ticker });
   }
 
   function dedupe(list, seenArr){
@@ -472,7 +487,7 @@
         +(lastRaw?'<pre id="dbgPre" hidden>'+esc(lastRaw)+'</pre>':'')
       +'</div>';
     }
-    if(state.loading){ p+='<div class="list">'+skeleton()+'</div>'; return p; }
+    if(state.loading){ p+='<div style="text-align:center;font-size:12px;color:var(--ink3);margin:14px 0 2px">Researching live — deep scan can take up to a minute.</div><div class="list">'+skeleton()+'</div>'; return p; }
 
     var cur=state.current;
     if(cur && cur.results && cur.results.length){

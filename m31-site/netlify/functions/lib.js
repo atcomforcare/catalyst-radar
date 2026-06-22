@@ -2,6 +2,7 @@
 // No external dependencies — relies on global fetch (Node 18+).
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
+// Quality model — runs in a background job, so the 30s sync limit doesn't apply.
 const ANTHROPIC_MODEL = "claude-sonnet-4-6";
 const FINNHUB = "https://finnhub.io/api/v1";
 
@@ -15,7 +16,7 @@ const SHAPE =
   '"consensus":"<=12 words","reasoning":"<=12 words"}';
 
 const PREFIX =
-  "You are a research assistant for a stock-idea UI. Use web search to ground every name in CURRENT, recent information. " +
+  "You are a research assistant for a stock-idea UI. Use web search to ground names in CURRENT, recent information. " +
   "Do NOT output any current or live stock price — only your own estimated price target (estTarget). " +
   "Never refuse, never apologize, never add prose, notes, or markdown. Output ONLY a raw JSON array and nothing else.";
 
@@ -83,7 +84,8 @@ async function askClaude(prompt, apiKey) {
       model: ANTHROPIC_MODEL,
       max_tokens: 2500,
       messages: [{ role: "user", content: prompt }],
-      tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 6 }],
+      // Deeper search is fine — this runs in a background job, not a 30s request.
+      tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 5 }],
     }),
   });
   const data = await res.json();
@@ -104,20 +106,25 @@ async function finnhubQuote(symbol, key) {
   return r.json(); // { c, d, dp, h, l, o, pc, t }
 }
 
-// Merge Claude candidates with real-time Finnhub quotes.
+// Merge Claude candidates with real-time Finnhub quotes (fetched in parallel for speed).
 // Drops any name without a valid live quote so a stale/guessed price can never show.
 async function enrich(candidates, finnhubKey) {
+  const valid = (candidates || []).filter((c) => c && c.ticker);
+  const quotes = await Promise.all(
+    valid.map(async (c) => {
+      try {
+        return await finnhubQuote(String(c.ticker).toUpperCase(), finnhubKey);
+      } catch (e) {
+        return null;
+      }
+    })
+  );
+
   const out = [];
-  for (const c of candidates) {
-    if (!c || !c.ticker) continue;
-    let q = null;
-    try {
-      q = await finnhubQuote(String(c.ticker).toUpperCase(), finnhubKey);
-    } catch (e) {
-      q = null;
-    }
+  valid.forEach((c, i) => {
+    const q = quotes[i];
     const price = q && isFinite(q.c) && q.c > 0 ? q.c : null;
-    if (price == null) continue; // no real quote -> skip entirely
+    if (price == null) return; // no real quote -> skip entirely
     const est = Number(c.estTarget);
     const target = isFinite(est) ? est : null;
     const upside = target != null && price ? ((target - price) / price) * 100 : null;
@@ -138,7 +145,7 @@ async function enrich(candidates, finnhubKey) {
       reasoning: c.reasoning || "",
       asOf: q && q.t ? q.t * 1000 : Date.now(),
     });
-  }
+  });
   return out;
 }
 

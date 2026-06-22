@@ -1,0 +1,9 @@
+{
+  "name": "m31-stox",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Catalyst Radar backend (Netlify Functions)",
+  "dependencies": {
+    "@netlify/blobs": ">=7 <10"
+  }
+}
