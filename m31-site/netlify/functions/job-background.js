@@ -9,7 +9,9 @@ exports.handler = async (event) => {
   if (!jobId) return; // nothing to track
 
   // @netlify/blobs is ESM-only — load it via dynamic import() from CommonJS.
-  const { getStore } = await import("@netlify/blobs");
+  // connectLambda(event) wires Blobs up for the legacy handler signature.
+  const { getStore, connectLambda } = await import("@netlify/blobs");
+  connectLambda(event);
   const store = getStore("catalyst-jobs");
   const A = process.env.ANTHROPIC_API_KEY;
   const F = process.env.FINNHUB_API_KEY;

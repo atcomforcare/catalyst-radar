@@ -6,7 +6,8 @@ exports.handler = async (event) => {
   if (!jobId) return jsonResp(400, { error: "missing jobId" });
   try {
     // @netlify/blobs is ESM-only — load it via dynamic import() from CommonJS.
-    const { getStore } = await import("@netlify/blobs");
+    const { getStore, connectLambda } = await import("@netlify/blobs");
+    connectLambda(event);
     const store = getStore("catalyst-jobs");
     const data = await store.get(jobId, { type: "json" });
     if (!data) return jsonResp(200, { status: "pending" });
